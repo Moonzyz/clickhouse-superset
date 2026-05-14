@@ -11,8 +11,8 @@ services:
       CLICKHOUSE_PASSWORD: fraud_password
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - ./clickhouse/data:/var/lib/clickhouse
-      - ./clickhouse/logs:/var/log/clickhouse-server
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
       - ./clickhouse/init:/docker-entrypoint-initdb.d
     ulimits:
       nofile:
@@ -45,3 +45,108 @@ services:
       superset run -h 0.0.0.0 -p 8088
       "
     restart: unless-stopped
+
+  kafka:
+    image: apache/kafka:4.1.2
+    container_name: fraud-kafka
+    hostname: kafka
+    ports:
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:29093"
+
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,PLAINTEXT_HOST://:29092,CONTROLLER://:29093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+
+      CLUSTER_ID: "4L6g3nShT-eMCtK--X86sw"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_NUM_PARTITIONS: 3
+    restart: unless-stopped
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: fraud-kafka-ui
+    depends_on:
+      - kafka
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: fraud-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    restart: unless-stopped
+
+  kafka-init:
+    image: apache/kafka:4.1.2
+    container_name: fraud-kafka-init
+    depends_on:
+      - kafka
+    command: >
+      /bin/sh -c "
+      sleep 15;
+      /opt/kafka/bin/kafka-topics.sh
+      --bootstrap-server kafka:9092
+      --create
+      --if-not-exists
+      --topic txn_enrich_fraud
+      --partitions 3
+      --replication-factor 1;
+      /opt/kafka/bin/kafka-topics.sh
+      --bootstrap-server kafka:9092
+      --list;
+      "
+    restart: "no"
+    
+  db-consumer:
+    build:
+      context: ./consumers
+    container_name: fraud-db-consumer
+    depends_on:
+      - kafka
+      - clickhouse
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: txn_enrich_fraud
+      KAFKA_GROUP_ID: db-consumer-clickhouse
+
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
+      CLICKHOUSE_USER: fraud_user
+      CLICKHOUSE_PASSWORD: fraud_password
+      CLICKHOUSE_DATABASE: fraud_db
+      CLICKHOUSE_TABLE: fraud_transactions_enriched
+
+      BATCH_SIZE: 200
+      FLUSH_INTERVAL_SECONDS: 2
+    restart: unless-stopped
+  telegram-alert-consumer:
+    build:
+      context: ./consumers
+    container_name: fraud-telegram-alert-consumer
+    depends_on:
+      - kafka
+    command: ["python", "telegram_alert_consumer.py"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: txn_enrich_fraud
+      KAFKA_GROUP_ID: telegram-alert-consumer
+
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+
+      ALERT_FLUSH_INTERVAL_SECONDS: 10
+      MAX_TXNS_IN_MESSAGE: 5
+    restart: unless-stopped
+  
+volumes:
+  clickhouse_data:
+  clickhouse_logs:

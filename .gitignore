@@ -1,5 +1,6 @@
 # Docker / database runtime data
 clickhouse/data/
+clickhouse/logs/
 superset_home/
 
 # Python / cache
